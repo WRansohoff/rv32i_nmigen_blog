@@ -12,13 +12,10 @@ SECTIONS
 {
   __stack_size = DEFINED(__stack_size) ? __stack_size : 128;
 
-  .vector_table :
-  {
-    KEEP (*(SORT_NONE(.vector_table)))
-  } >ROM
-
   .text :
   {
+    KEEP (*(SORT_NONE(.reset_handler)))
+    KEEP (*(SORT_NONE(.vector_table)))
     *(.rodata .rodata.*)
     *(.srodata .srodata.*)
     *(.text .text.*)
