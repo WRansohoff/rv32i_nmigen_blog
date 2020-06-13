@@ -46,23 +46,6 @@ vtable:
   .word 0
   // 11: Environment call from M-mode trap.
   J trap_ecall
-  .word 0
-  .word 0
-  .word 0
-  .word 0
-  .word 0
-  .word 0
-  .word 0
-  .word 0
-  .word 0
-  .word 0
-  .word 0
-  .word 0
-  // 24-28: Neopixel peripheral interrupts.
-  J irq_npx1
-  J irq_npx2
-  J irq_npx3
-  J irq_npx4
 
   /*
    * Weak aliases to point each exception hadnler to the
@@ -79,14 +62,6 @@ vtable:
   .set  trap_smis,default_interrupt_handler
   .weak trap_ecall
   .set  trap_ecall,default_interrupt_handler
-  .weak irq_npx1
-  .set  irq_npx1,default_interrupt_handler
-  .weak irq_npx2
-  .set  irq_npx2,default_interrupt_handler
-  .weak irq_npx3
-  .set  irq_npx3,default_interrupt_handler
-  .weak irq_npx4
-  .set  irq_npx4,default_interrupt_handler
 
 /*
  * A 'default' interrupt handler, in case an interrupt triggers
