@@ -72,27 +72,6 @@ class CPU( Elaboratable ):
     # Wait-state counter to let internal memories load.
     iws = Signal( 2, reset = 0 )
 
-    # Trigger an 'instruction mis-aligned' trap if necessary. 
-    with m.If( self.pc[ :2 ] != 0 ):
-      m.d.sync += self.csr.mtval_einfo.eq( self.pc )
-      self.trigger_trap( m, TRAP_IMIS, Past( self.pc ) )
-    with m.Else():
-      # I-bus is active until it completes a transaction.
-      m.d.comb += self.mem.imux.bus.cyc.eq( iws == 0 )
-
-    # Wait a cycle after 'ack' to load the appropriate CPU registers.
-    with m.If( self.mem.imux.bus.ack ):
-      # Increment the wait-state counter.
-      # (This also lets the instruction bus' 'cyc' signal fall.)
-      m.d.sync += iws.eq( 1 )
-      with m.If( iws == 0 ):
-        # Increment pared-down 32-bit MINSTRET counter.
-        # I'd remove the whole MINSTRET CSR to save space, but the
-        # test harnesses depend on it to count instructions.
-        # TODO: This is OBO; it'll be 1 before the first retire.
-        m.d.sync += self.csr.minstret_instrs.eq(
-          self.csr.minstret_instrs + 1 )
-
     # Top-level combinatorial logic.
     m.d.comb += [
       # Set CPU register access addresses.
@@ -114,116 +93,26 @@ class CPU( Elaboratable ):
       self.mem.dmux.bus.dat_w.eq( self.rb.data ),
     ]
 
-    # 'Always-on' decode/execute logic:
-    with m.Switch( self.mem.imux.bus.dat_r[ 0 : 7 ] ):
-      # LUI / AUIPC instructions: set destination register to
-      # 20 upper bits, +pc for AUIPC.
-      with m.Case( '0-10111' ):
-        m.d.comb += self.rc.data.eq(
-          Mux( self.mem.imux.bus.dat_r[ 5 ], 0, self.pc ) +
-          Cat( Repl( 0, 12 ),
-               self.mem.imux.bus.dat_r[ 12 : 32 ] ) )
+    # Trigger an 'instruction mis-aligned' trap if necessary. 
+    with m.If( self.pc[ :2 ] != 0 ):
+      m.d.sync += self.csr.mtval_einfo.eq( self.pc )
+      self.trigger_trap( m, TRAP_IMIS, Past( self.pc ) )
+    with m.Else():
+      # I-bus is active until it completes a transaction.
+      m.d.comb += self.mem.imux.bus.cyc.eq( iws == 0 )
 
-      # JAL / JALR instructions: set destination register to
-      # the 'return PC' value.
-      with m.Case( '110-111' ):
-        m.d.comb += self.rc.data.eq( self.pc + 4 )
-
-      # Conditional branch instructions:
-      # set us up the ALU for the condition check.
-      with m.Case( OP_BRANCH ):
-        # BEQ / BNE: use SUB ALU operation to check equality.
-        # BLT / BGE / BLTU / BGEU: use SLT or SLTU ALU operation.
-        m.d.comb += [
-          self.alu.a.eq( self.ra.data ),
-          self.alu.b.eq( self.rb.data ),
-          self.alu.f.eq( Mux(
-            self.mem.imux.bus.dat_r[ 14 ],
-            Cat( self.mem.imux.bus.dat_r[ 13 ], 0b001 ),
-            0b1000 ) )
-        ]
-
-      # Load instructions: Set the memory address and data register.
-      with m.Case( OP_LOAD ):
-        m.d.comb += [
-          self.mem.dmux.bus.adr.eq( self.ra.data +
-            Cat( self.mem.imux.bus.dat_r[ 20 : 32 ],
-                 Repl( self.mem.imux.bus.dat_r[ 31 ], 20 ) ) ),
-          self.rc.data.bit_select( 0, 8 ).eq(
-            self.mem.dmux.bus.dat_r[ :8 ] )
-        ]
-        with m.If( self.mem.imux.bus.dat_r[ 12 ] ):
-          m.d.comb += [
-            self.rc.data.bit_select( 8, 8 ).eq(
-              self.mem.dmux.bus.dat_r[ 8 : 16 ] ),
-            self.rc.data.bit_select( 16, 16 ).eq(
-              Repl( ( self.mem.imux.bus.dat_r[ 14 ] == 0 ) &
-                    self.mem.dmux.bus.dat_r[ 15 ], 16 ) )
-          ]
-        with m.Elif( self.mem.imux.bus.dat_r[ 13 ] ):
-          m.d.comb += self.rc.data.bit_select( 8, 24 ).eq(
-            self.mem.dmux.bus.dat_r[ 8 : 32 ] )
-        with m.Else():
-          m.d.comb += self.rc.data.bit_select( 8, 24 ).eq(
-            Repl( ( self.mem.imux.bus.dat_r[ 14 ] == 0 ) &
-                  self.mem.dmux.bus.dat_r[ 7 ], 24 ) )
-
-      # Store instructions: Set the memory address.
-      with m.Case( OP_STORE ):
-        m.d.comb += self.mem.dmux.bus.adr.eq( self.ra.data +
-          Cat( self.mem.imux.bus.dat_r[ 7 : 12 ],
-               self.mem.imux.bus.dat_r[ 25 : 32 ],
-               Repl( self.mem.imux.bus.dat_r[ 31 ], 20 ) ) )
-
-      # R-type ALU operation: set inputs for rc = ra ? rb
-      with m.Case( OP_REG ):
-        # Implement left shifts using the right shift ALU operation.
-        with m.If( self.mem.imux.bus.dat_r[ 12 : 15 ] == 0b001 ):
-          m.d.comb += [
-            self.alu.a.eq( FLIP( self.ra.data ) ),
-            self.alu.f.eq( 0b0101 ),
-            self.rc.data.eq( FLIP( self.alu.y ) )
-          ]
-        with m.Else():
-          m.d.comb += [
-            self.alu.a.eq( self.ra.data ),
-            self.alu.f.eq( Cat(
-              self.mem.imux.bus.dat_r[ 12 : 15 ],
-              self.mem.imux.bus.dat_r[ 30 ] ) ),
-            self.rc.data.eq( self.alu.y ),
-          ]
-        m.d.comb += self.alu.b.eq( self.rb.data )
-
-      # I-type ALU operation: set inputs for rc = ra ? immediate
-      with m.Case( OP_IMM ):
-        # Shift operations are a bit different from normal I-types.
-        # They use 'funct7' bits like R-type operations, and the
-        # left shift can be implemented as a right shift to avoid
-        # having two barrel shifters in the ALU.
-        with m.If( self.mem.imux.bus.dat_r[ 12 : 14 ] == 0b01 ):
-          with m.If( self.mem.imux.bus.dat_r[ 14 ] == 0 ):
-            m.d.comb += [
-              self.alu.a.eq( FLIP( self.ra.data ) ),
-              self.alu.f.eq( 0b0101 ),
-              self.rc.data.eq( FLIP( self.alu.y ) ),
-            ]
-          with m.Else():
-            m.d.comb += [
-              self.alu.a.eq( self.ra.data ),
-              self.alu.f.eq( Cat( 0b101, self.mem.imux.bus.dat_r[ 30 ] ) ),
-              self.rc.data.eq( self.alu.y ),
-            ]
-        # Normal I-type operation:
-        with m.Else():
-          m.d.comb += [
-            self.alu.a.eq( self.ra.data ),
-            self.alu.f.eq( self.mem.imux.bus.dat_r[ 12 : 15 ] ),
-            self.rc.data.eq( self.alu.y ),
-          ]
-        # Shared I-type logic:
-        m.d.comb += self.alu.b.eq( Cat(
-          self.mem.imux.bus.dat_r[ 20 : 32 ],
-          Repl( self.mem.imux.bus.dat_r[ 31 ], 20 ) ) )
+    # Wait a cycle after 'ack' to load the appropriate CPU registers.
+    with m.If( self.mem.imux.bus.ack ):
+      # Increment the wait-state counter.
+      # (This also lets the instruction bus' 'cyc' signal fall.)
+      m.d.sync += iws.eq( 1 )
+      with m.If( iws == 0 ):
+        # Increment pared-down 32-bit MINSTRET counter.
+        # I'd remove the whole MINSTRET CSR to save space, but the
+        # test harnesses depend on it to count instructions.
+        # TODO: This is OBO; it'll be 1 before the first retire.
+        m.d.sync += self.csr.minstret_instrs.eq(
+          self.csr.minstret_instrs + 1 )
 
     # Execute the current instruction, once it loads.
     with m.If( iws != 0 ):
@@ -233,6 +122,7 @@ class CPU( Elaboratable ):
         self.pc.eq( self.pc + 4 ),
         iws.eq( 0 )
       ]
+
       # Decoder switch case:
       with m.Switch( self.mem.imux.bus.dat_r[ 0 : 7 ] ):
         # LUI / AUIPC / R-type / I-type instructions: apply
@@ -345,6 +235,117 @@ class CPU( Elaboratable ):
         # There is also no pipelining. So...this is a nop.
         with m.Case( OP_FENCE ):
           pass
+
+    # 'Always-on' decode/execute logic:
+    with m.Switch( self.mem.imux.bus.dat_r[ 0 : 7 ] ):
+      # LUI / AUIPC instructions: set destination register to
+      # 20 upper bits, +pc for AUIPC.
+      with m.Case( '0-10111' ):
+        m.d.comb += self.rc.data.eq(
+          Mux( self.mem.imux.bus.dat_r[ 5 ], 0, self.pc ) +
+          Cat( Repl( 0, 12 ),
+               self.mem.imux.bus.dat_r[ 12 : 32 ] ) )
+
+      # JAL / JALR instructions: set destination register to
+      # the 'return PC' value.
+      with m.Case( '110-111' ):
+        m.d.comb += self.rc.data.eq( self.pc + 4 )
+
+      # Conditional branch instructions:
+      # set us up the ALU for the condition check.
+      with m.Case( OP_BRANCH ):
+        # BEQ / BNE: use SUB ALU operation to check equality.
+        # BLT / BGE / BLTU / BGEU: use SLT or SLTU ALU operation.
+        m.d.comb += [
+          self.alu.a.eq( self.ra.data ),
+          self.alu.b.eq( self.rb.data ),
+          self.alu.f.eq( Mux(
+            self.mem.imux.bus.dat_r[ 14 ],
+            Cat( self.mem.imux.bus.dat_r[ 13 ], 0b001 ),
+            0b1000 ) )
+        ]
+
+      # Load instructions: Set the memory address and data register.
+      with m.Case( OP_LOAD ):
+        m.d.comb += [
+          self.mem.dmux.bus.adr.eq( self.ra.data +
+            Cat( self.mem.imux.bus.dat_r[ 20 : 32 ],
+                 Repl( self.mem.imux.bus.dat_r[ 31 ], 20 ) ) ),
+          self.rc.data.bit_select( 0, 8 ).eq(
+            self.mem.dmux.bus.dat_r[ :8 ] )
+        ]
+        with m.If( self.mem.imux.bus.dat_r[ 12 ] ):
+          m.d.comb += [
+            self.rc.data.bit_select( 8, 8 ).eq(
+              self.mem.dmux.bus.dat_r[ 8 : 16 ] ),
+            self.rc.data.bit_select( 16, 16 ).eq(
+              Repl( ( self.mem.imux.bus.dat_r[ 14 ] == 0 ) &
+                    self.mem.dmux.bus.dat_r[ 15 ], 16 ) )
+          ]
+        with m.Elif( self.mem.imux.bus.dat_r[ 13 ] ):
+          m.d.comb += self.rc.data.bit_select( 8, 24 ).eq(
+            self.mem.dmux.bus.dat_r[ 8 : 32 ] )
+        with m.Else():
+          m.d.comb += self.rc.data.bit_select( 8, 24 ).eq(
+            Repl( ( self.mem.imux.bus.dat_r[ 14 ] == 0 ) &
+                  self.mem.dmux.bus.dat_r[ 7 ], 24 ) )
+
+      # Store instructions: Set the memory address.
+      with m.Case( OP_STORE ):
+        m.d.comb += self.mem.dmux.bus.adr.eq( self.ra.data +
+          Cat( self.mem.imux.bus.dat_r[ 7 : 12 ],
+               self.mem.imux.bus.dat_r[ 25 : 32 ],
+               Repl( self.mem.imux.bus.dat_r[ 31 ], 20 ) ) )
+
+      # R-type ALU operation: set inputs for rc = ra ? rb
+      with m.Case( OP_REG ):
+        # Implement left shifts using the right shift ALU operation.
+        with m.If( self.mem.imux.bus.dat_r[ 12 : 15 ] == 0b001 ):
+          m.d.comb += [
+            self.alu.a.eq( FLIP( self.ra.data ) ),
+            self.alu.f.eq( 0b0101 ),
+            self.rc.data.eq( FLIP( self.alu.y ) )
+          ]
+        with m.Else():
+          m.d.comb += [
+            self.alu.a.eq( self.ra.data ),
+            self.alu.f.eq( Cat(
+              self.mem.imux.bus.dat_r[ 12 : 15 ],
+              self.mem.imux.bus.dat_r[ 30 ] ) ),
+            self.rc.data.eq( self.alu.y ),
+          ]
+        m.d.comb += self.alu.b.eq( self.rb.data )
+
+      # I-type ALU operation: set inputs for rc = ra ? immediate
+      with m.Case( OP_IMM ):
+        # Shift operations are a bit different from normal I-types.
+        # They use 'funct7' bits like R-type operations, and the
+        # left shift can be implemented as a right shift to avoid
+        # having two barrel shifters in the ALU.
+        with m.If( self.mem.imux.bus.dat_r[ 12 : 14 ] == 0b01 ):
+          with m.If( self.mem.imux.bus.dat_r[ 14 ] == 0 ):
+            m.d.comb += [
+              self.alu.a.eq( FLIP( self.ra.data ) ),
+              self.alu.f.eq( 0b0101 ),
+              self.rc.data.eq( FLIP( self.alu.y ) ),
+            ]
+          with m.Else():
+            m.d.comb += [
+              self.alu.a.eq( self.ra.data ),
+              self.alu.f.eq( Cat( 0b101, self.mem.imux.bus.dat_r[ 30 ] ) ),
+              self.rc.data.eq( self.alu.y ),
+            ]
+        # Normal I-type operation:
+        with m.Else():
+          m.d.comb += [
+            self.alu.a.eq( self.ra.data ),
+            self.alu.f.eq( self.mem.imux.bus.dat_r[ 12 : 15 ] ),
+            self.rc.data.eq( self.alu.y ),
+          ]
+        # Shared I-type logic:
+        m.d.comb += self.alu.b.eq( Cat(
+          self.mem.imux.bus.dat_r[ 20 : 32 ],
+          Repl( self.mem.imux.bus.dat_r[ 31 ], 20 ) ) )
 
     # End of CPU module definition.
     return m
@@ -537,6 +538,7 @@ from tests.test_roms.rv32i_srli import *
 from tests.test_roms.rv32i_sub import *
 from tests.test_roms.rv32i_xor import *
 from tests.test_roms.rv32i_xori import *
+from tests.test_roms.rv32i_gpio import *
 
 # 'main' method to run a basic testbench.
 if __name__ == "__main__":
@@ -559,6 +561,7 @@ if __name__ == "__main__":
 
       print( '--- CPU Tests ---' )
       # Simulate the 'infinite loop' ROM to screen for syntax errors.
+      cpu_sim( gpio_test )
       cpu_sim( loop_test )
       cpu_spi_sim( loop_test )
       cpu_sim( ram_pc_test )

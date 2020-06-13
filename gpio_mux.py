@@ -60,7 +60,15 @@ class GPIO_Mux( Elaboratable, Interface ):
       self.p = Array(
         platform.request( "gpio", i ) if i in PINS else None
         for i in range( max( PINS ) + 1 ) )
-# Switch case to read/write the currently-addressed register.
+
+    # Read bits default to 0. Bus signals follow 'cyc'.
+    m.d.comb += [
+      self.dat_r.eq( 0 ),
+      self.stb.eq( self.cyc ),
+    ]
+    m.d.sync +=  self.ack.eq( self.cyc )
+
+    # Switch case to read/write the currently-addressed register.
     # This peripheral must be accessed with a word-aligned address.
     with m.Switch( self.adr ):
       # 49 pin addresses (0-48), 8 pins per register, so 7 registers.
