@@ -538,7 +538,6 @@ from tests.test_roms.rv32i_srli import *
 from tests.test_roms.rv32i_sub import *
 from tests.test_roms.rv32i_xor import *
 from tests.test_roms.rv32i_xori import *
-from tests.test_roms.rv32i_gpio import *
 
 # 'main' method to run a basic testbench.
 if __name__ == "__main__":
@@ -561,7 +560,6 @@ if __name__ == "__main__":
 
       print( '--- CPU Tests ---' )
       # Simulate the 'infinite loop' ROM to screen for syntax errors.
-      cpu_sim( gpio_test )
       cpu_sim( loop_test )
       cpu_spi_sim( loop_test )
       cpu_sim( ram_pc_test )
